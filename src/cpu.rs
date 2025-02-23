@@ -3,8 +3,12 @@
 pub struct CPU {
     pub pc: u16,        // Program counter
     pub acc: u8,        // Accumulator register
+    pub reg_a: u8,  // Additional register
+    pub reg_b: u8,  // Additional register
     pub memory: Memory, // Memory module
     pub halted: bool,   // Halt flag to stop the CPU
+    pub sp: u16,  //  Stack Pointer
+    pub interrupts_enabled: bool, // New field to track interrupt state
 }
 
 impl CPU {
@@ -13,8 +17,13 @@ impl CPU {
         CPU {
             pc: 0,
             acc: 0,
+            reg_a: 0,
+            reg_b: 0,
             memory: Memory::new(memory_size),
             halted: false,
+            sp: 0,
+            interrupts_enabled: false, // Interrupts are initially disabled
+
         }
     }
 
@@ -31,6 +40,77 @@ impl CPU {
         let high_byte = self.fetch()? as u16;
         Ok((high_byte << 8) | low_byte) // Combine high and low bytes
     }
+    fn mov(&mut self) {
+        self.reg_b = self.reg_a; // Example: Move reg_a's value to reg_b
+    }
+
+    fn mul(&mut self) {
+        self.acc = self.reg_a.wrapping_mul(self.reg_b); // Handle overflow with wrapping
+    }
+    fn div(&mut self) -> Result<(), String> {
+        if self.reg_b == 0 {
+            return Err("Division by zero".to_string());
+        }
+        self.acc = self.reg_a / self.reg_b;
+        Ok(())
+    }
+    fn cmp(&self) -> Result<(), String> {
+        // Perform the comparison, but don't return an `i8`
+        Ok(())
+    }
+    fn call(&mut self) -> Result<(), String> {
+        let address = self.fetch_address()?; // Fetch target address (of type u16)
+        if self.sp < 2 {                     // Ensure enough stack space
+            return Err("Stack overflow - not enough space to push PC".to_string());
+        }
+        self.sp -= 2;                        // Decrement stack pointer
+        self.memory.write_u16(self.sp as usize, self.pc)?; // Push PC onto the stack
+        self.pc = address;                   // Set PC to the subroutine address (of type u16)
+        Ok(())                               // Return success
+    }
+    fn ret(&mut self) -> Result<(), String> {
+        self.sp += 2;                                // Increment stack pointer
+        self.memory.write_u16(self.sp as usize, self.pc)?; // Pop PC
+        Ok(())
+    }
+    fn jp(&mut self, condition: bool) {
+        if condition {
+            self.pc = self.fetch_address().unwrap();
+        }
+    }
+    fn jn(&mut self, condition: bool) {
+        if condition {
+            self.pc = self.fetch_address().unwrap();
+        }
+    }
+    fn int(&mut self) -> Result<(), String> {
+        let interrupt_vector = self.fetch_address()?; // Safely fetch interrupt vector
+        self.memory
+            .write_u16(self.sp as usize, self.pc)
+            .map_err(|_| "Failed to write to memory".to_string())?; // Handle memory write errors
+        self.sp = self.sp.checked_sub(2).ok_or("Stack underflow")?; // Safely decrement SP
+        self.pc = interrupt_vector; // Jump to interrupt handler
+        Ok(())
+    }
+    fn cli(&mut self) {
+        self.interrupts_enabled = false;
+    }
+
+    fn sei(&mut self) {
+        self.interrupts_enabled = true;
+    }
+    fn push(&mut self, value: u8) -> Result<(), String> {
+        self.sp = self.sp.checked_sub(1).ok_or("Stack underflow")?; // Safely decrement Stack Pointer
+        self.memory
+            .write(self.sp as usize, value) // Write value to memory
+            .map_err(|e| format!("Failed to push value to memory: {}", e)) // Handle memory write errors
+    }
+    fn pop(&mut self) -> Result<u8, String> {
+        // Implementation of popping data directly, no need to pass a mutable borrow of the target field
+        let value = self.memory.read(self.sp as usize)?; // Example logic
+        self.sp = self.sp.wrapping_add(1); // Modify the stack pointer
+        Ok(value)
+    }
 
     /// Execute the given instruction based on its opcode
     pub fn execute(&mut self, instruction: u8) -> Result<(), String> {
@@ -39,6 +119,7 @@ impl CPU {
             0x01 => {
                 let address = self.fetch_address()?;
                 self.acc = self.memory.read(address as usize)?;
+
             }
 
             // STORE: Store the accumulator value into a memory address
@@ -118,6 +199,23 @@ impl CPU {
             0x13 => {
                 self.acc = self.fetch()?;
             }
+            0x14 => self.mov(),               // MOV instruction
+            0x15 => self.mul(),               // MUL instruction
+            0x16 => self.div()?,              // DIV instruction
+            0x17 => self.cmp()?,               // CMP instruction
+            0x18 => self.call()?,             // CALL instruction
+            0x19 => self.ret()?,              // RET instruction
+            0x1A => self.jp(true),            // JP (Jump if Positive)
+            0x1B => self.jn(true),            // JN (Jump if Negative)
+            0x1C => self.int()?,               // INT (Interrupt)
+            0x1D => self.cli(),               // CLI (Disable Interrupts)
+            0x1E => self.sei(),               // SEI (Enable Interrupts)
+            0x1F => self.push(self.reg_a)?,    // PUSH reg_a
+            0x20 => {
+                let value = self.pop()?;      // First, pop the value from the stack
+                self.reg_a = value;           // Then, assign it to reg_a
+            }, // POP reg_a
+
 
             // HALT: Stop the CPU
             0xFF => {
